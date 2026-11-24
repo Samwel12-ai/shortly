@@ -2,6 +2,8 @@ const prisma = require("../config/db");
 const config = require("../config/env");
 const HttpError = require("../lib/httpError");
 const { generateCode } = require("../lib/code");
+const linkCache = require("../lib/linkCache");
+const { enqueueClickAnalytics } = require("./jobQueue");
 
 const RESERVED_CODES = new Set(["api", "health", "metrics", "admin"]);
 const MAX_CODE_ATTEMPTS = 5;
@@ -97,7 +99,7 @@ async function updateLink(user, id, changes) {
 
   const link = await prisma.link.update({ where: { id }, data });
 
-  // Phase 3: invalidate the cache entry for link.code here
+  linkCache.delete(existing.code);
 
   return toDto(link);
 }
@@ -109,7 +111,47 @@ async function deleteLink(user, id) {
 
   await prisma.link.delete({ where: { id } });
 
-  // Phase 3: invalidate the cache entry for existing.code here
+  linkCache.delete(existing.code);
 }
 
-module.exports = { createLink, listLinks, getLink, updateLink, deleteLink };
+async function redirectLink(code, metadata = {}) {
+  let link = linkCache.get(code);
+
+  if (!link) {
+    link = await prisma.link.findUnique({
+      where: { code },
+    });
+
+    if (!link) {
+      throw new HttpError(404, "Link not found");
+    }
+
+    linkCache.set(code, link);
+  }
+
+  if (!link.isActive) {
+    throw new HttpError(410, "Link is disabled");
+  }
+
+  if (link.expiresAt && new Date(link.expiresAt) < new Date()) {
+    throw new HttpError(410, "Link has expired");
+  }
+
+  await enqueueClickAnalytics({
+    linkId: link.id,
+    ip: metadata.ip,
+    userAgent: metadata.userAgent,
+    referrer: metadata.referrer,
+  });
+
+  return link.originalUrl;
+}
+
+module.exports = {
+  createLink,
+  listLinks,
+  getLink,
+  updateLink,
+  deleteLink,
+  redirectLink,
+};

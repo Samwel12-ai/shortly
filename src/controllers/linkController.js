@@ -32,4 +32,21 @@ const remove = async (req, res) => {
   res.status(204).send();
 };
 
-module.exports = { create, list, getOne, update, remove };
+const redirect = async (req, res) => {
+  const url = await linkService.redirectLink(req.params.code, {
+    ip: req.ip,
+    userAgent: req.get("user-agent") || null,
+    referrer: req.get("referer") || null,
+  });
+
+  res.redirect(url);
+};
+
+module.exports = {
+  create,
+  list,
+  getOne,
+  update,
+  remove,
+  redirect,
+};
