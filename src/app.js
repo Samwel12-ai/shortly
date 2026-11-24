@@ -2,6 +2,8 @@ require("./config/env");
 const express = require("express");
 const cors = require("cors");
 const prisma = require("./config/db");
+const authRoutes = require("./routes/authRoutes");
+const linkRoutes = require("./routes/linkRoutes");
 const errorHandler = require("./middleware/errorMiddleware");
 
 const app = express();
@@ -18,6 +20,9 @@ app.get("/health", async (req, res) => {
     res.status(503).json({ status: "degraded", db: "down" });
   }
 });
+
+app.use("/api/auth", authRoutes);
+app.use("/api/links", linkRoutes);
 
 app.use((req, res) => {
   res.status(404).json({ message: "Route not found" });
