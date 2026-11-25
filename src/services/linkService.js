@@ -7,6 +7,7 @@ const { enqueueClickAnalytics } = require("./jobQueue");
 
 const RESERVED_CODES = new Set(["api", "health", "metrics", "admin"]);
 const MAX_CODE_ATTEMPTS = 5;
+const CODE_PATTERN = /^[A-Za-z0-9_-]{3,32}$/;
 
 const toDto = (link) => ({
   id: link.id,
@@ -115,6 +116,11 @@ async function deleteLink(user, id) {
 }
 
 async function redirectLink(code, metadata = {}) {
+  // Junk such as /favicon.ico never reaches the cache or the database
+  if (!CODE_PATTERN.test(code)) {
+    throw new HttpError(404, "Link not found");
+  }
+
   let link = linkCache.get(code);
 
   if (!link) {
@@ -137,11 +143,16 @@ async function redirectLink(code, metadata = {}) {
     throw new HttpError(410, "Link has expired");
   }
 
-  await enqueueClickAnalytics({
+  // Analytics must never slow down or break a redirect:
+  // don't wait for the insert, just log it if it fails
+  enqueueClickAnalytics({
     linkId: link.id,
+    clickedAt: new Date().toISOString(),
     ip: metadata.ip,
     userAgent: metadata.userAgent,
     referrer: metadata.referrer,
+  }).catch((err) => {
+    console.error("Failed to enqueue click analytics:", err.message);
   });
 
   return link.originalUrl;

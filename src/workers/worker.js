@@ -1,6 +1,7 @@
 require("../config/env");
 
 const prisma = require("../config/db");
+const { getRetryDelayMs } = require("../lib/backoff");
 
 const POLL_INTERVAL = 1000;
 const STALE_LOCK_MINUTES = 5;
@@ -10,23 +11,27 @@ let stopping = false;
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+// Prisma stores DateTime as UTC in "timestamp without time zone" columns, so the
+// raw SQL below compares against (NOW() AT TIME ZONE 'UTC'). Plain NOW() would be
+// interpreted in the database session's time zone (Africa/Cairo is UTC+2) and
+// could make retries run too early or too late.
 async function claimJob() {
   const jobs = await prisma.$queryRaw`
     UPDATE "Job"
     SET
       "status" = 'PROCESSING',
-      "lockedAt" = NOW(),
+      "lockedAt" = (NOW() AT TIME ZONE 'UTC'),
       "attempts" = "attempts" + 1,
-      "updatedAt" = NOW()
+      "updatedAt" = (NOW() AT TIME ZONE 'UTC')
     WHERE "id" IN (
       SELECT "id"
       FROM "Job"
       WHERE
-        ("status" = 'PENDING' AND "runAt" <= NOW())
+        ("status" = 'PENDING' AND "runAt" <= (NOW() AT TIME ZONE 'UTC'))
         OR
         (
           "status" = 'PROCESSING'
-          AND "lockedAt" < NOW() - (${STALE_LOCK_MINUTES} * INTERVAL '1 minute')
+          AND "lockedAt" < (NOW() AT TIME ZONE 'UTC') - (${STALE_LOCK_MINUTES} * INTERVAL '1 minute')
         )
       ORDER BY "runAt" ASC, "id" ASC
       FOR UPDATE SKIP LOCKED
@@ -62,6 +67,8 @@ async function processJob(job) {
           ip: payload.ip || null,
           userAgent: payload.userAgent || null,
           referrer: payload.referrer || null,
+          // Use the moment of the click, not the moment the worker got to it
+          createdAt: payload.clickedAt ? new Date(payload.clickedAt) : undefined,
         },
       });
     }
@@ -81,11 +88,7 @@ async function processJob(job) {
 
 async function handleFailure(job, error) {
   const failedPermanently = job.attempts >= job.maxAttempts;
-
-  const retryDelay = Math.min(
-    60_000,
-    1000 * 2 ** Math.max(0, job.attempts - 1),
-  );
+  const retryDelay = getRetryDelayMs(job.attempts);
 
   await prisma.job.update({
     where: { id: job.id },
